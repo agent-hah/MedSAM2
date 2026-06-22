@@ -11,3 +11,8 @@ _C.*
 outputs/*
 checkpoints/*.pt
 *.pt
+exp_log
+log.txt
+wget-log
+*.so
+sam2/_C.so

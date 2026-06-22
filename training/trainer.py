@@ -222,11 +222,12 @@ class Trainer:
                 # if there is not a checkpoint to resume from already there
                 makedir(self.checkpoint_conf.save_dir)
                 g_pathmgr.copy(self.checkpoint_conf.resume_from, dst)
-            barrier()
-
+            if is_dist_avail_and_initialized():
+                barrier()
         self.load_checkpoint()
         self._setup_ddp_distributed_training(distributed, accelerator)
-        barrier()
+        if is_dist_avail_and_initialized():
+            barrier()
 
     def _setup_timers(self):
         """
@@ -292,12 +293,18 @@ class Trainer:
 
         assert isinstance(self.model, torch.nn.Module)
 
-        self.model = nn.parallel.DistributedDataParallel(
-            self.model,
-            device_ids=[self.local_rank] if accelerator == "cuda" else [],
-            find_unused_parameters=distributed_conf.find_unused_parameters,
-        )
-        if distributed_conf.comms_dtype is not None:  # noqa
+        if distributed_conf.backend is not None and torch.cuda.device_count() > 1:
+            logging.info("Initializing DistributedDataParallel")
+            self.model = nn.parallel.DistributedDataParallel(
+                self.model,
+                device_ids=[self.local_rank] if accelerator == "cuda" else [],
+                find_unused_parameters=distributed_conf.find_unused_parameters,
+            )
+        else:
+            logging.info("Skipping DDP wrapper (Single GPU mode)")
+            self.model = self.model.to(self.device)
+
+        if isinstance(self.model, nn.parallel.DistributedDataParallel) and distributed_conf.comms_dtype is not None:
             from torch.distributed.algorithms import ddp_comm_hooks
 
             amp_type = get_amp_type(distributed_conf.comms_dtype)
@@ -528,7 +535,8 @@ class Trainer:
 
         while self.epoch < self.max_epochs:
             dataloader = self.train_dataset.get_loader(epoch=int(self.epoch))
-            barrier()
+            if is_dist_avail_and_initialized():
+                barrier()
             outs = self.train_epoch(dataloader)
             self.logger.log_dict(outs, self.epoch)  # Logged only on rank 0
 
@@ -672,7 +680,8 @@ class Trainer:
                     )
 
             if data_iter % 10 == 0:
-                dist.barrier()
+                if is_dist_avail_and_initialized():
+                    dist.barrier()
 
         self.est_epoch_time[phase] = batch_time.avg * iters_per_epoch
         self._log_timers(phase)
