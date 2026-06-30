@@ -16,3 +16,4 @@ log.txt
 wget-log
 *.so
 sam2/_C.so
+data/medsam_preprocessed/DIAS_Scribble_RDFA_NPZ

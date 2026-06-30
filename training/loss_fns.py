@@ -11,10 +11,76 @@ import torch
 import torch.distributed
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as cp
 
 from training.trainer import CORE_LOSS_KEY
 
 from training.utils.distributed import get_world_size, is_dist_avail_and_initialized
+
+def soft_erode(img):
+    """Differentiable erosion using max pooling"""
+    p1 = -F.max_pool2d(-img, (3,1), (1,1), (1,0))
+    p2 = -F.max_pool2d(-img, (1,3), (1,1), (0,1))
+    return torch.min(p1, p2)
+
+def soft_dilate(img):
+    """Differentiable dilation using max pooling"""
+    return F.max_pool2d(img, (3,3), (1,1), (1,1))
+
+def soft_open(img):
+    return soft_dilate(soft_erode(img))
+
+def soft_skel(img, iter_=10):
+    """Approximates the morphological skeleton iteratively"""
+    img1 = img
+    skel = torch.zeros_like(img)
+    for i in range(iter_):
+        eroded = soft_erode(img1)
+        opened = soft_open(eroded)
+        skel = torch.max(skel, eroded - opened)
+        img1 = eroded
+    return skel
+
+
+def cldice_loss(inputs, targets, num_objects, loss_on_multimask=False):
+    """
+    Differentiable clDice Loss for preserving vessel topology.
+    """
+    inputs = inputs.sigmoid()
+
+    if loss_on_multimask:
+        # Flatten multimask dimension into batch dimension for pooling
+        N, M, H, W = inputs.shape
+        inputs_flat = inputs.reshape(N * M, 1, H, W)
+        targets_flat = targets.reshape(N * M, 1, H, W)
+    else:
+        inputs_flat = inputs.unsqueeze(1) if inputs.dim() == 3 else inputs
+        targets_flat = targets.unsqueeze(1) if targets.dim() == 3 else targets
+
+    # ==========================================
+    # GRADIENT CHECKPOINTING
+    # ==========================================
+    # We only checkpoint the predictions. Ground truth doesn't need gradients.
+    if inputs_flat.requires_grad:
+        # use_reentrant=False is highly recommended in PyTorch >2.0 for stability
+        skel_pred = cp.checkpoint(soft_skel, inputs_flat, use_reentrant=False)
+    else:
+        skel_pred = soft_skel(inputs_flat)
+
+    skel_target = soft_skel(targets_flat)
+
+    # Topology Precision & Sensitivity
+    tprec = (torch.sum(skel_pred * targets_flat, dim=(2, 3)) + 1e-5) / (torch.sum(skel_pred, dim=(2, 3)) + 1e-5)
+    tsens = (torch.sum(skel_target * inputs_flat, dim=(2, 3)) + 1e-5) / (torch.sum(skel_target, dim=(2, 3)) + 1e-5)
+
+    # Harmonic Mean
+    cl_dice = 2.0 * (tprec * tsens) / (tprec + tsens + 1e-5)
+    loss = 1.0 - cl_dice
+
+    if loss_on_multimask:
+        loss = loss.reshape(N, M)
+        return loss / num_objects
+    return loss.sum() / num_objects
 
 
 def dice_loss(inputs, targets, num_objects, loss_on_multimask=False):
@@ -157,6 +223,8 @@ class MultiStepMultiMasksAndIous(nn.Module):
         assert "loss_iou" in self.weight_dict
         if "loss_class" not in self.weight_dict:
             self.weight_dict["loss_class"] = 0.0
+        if "loss_cldice" not in self.weight_dict:
+            self.weight_dict["loss_cldice"] = 0.0
 
         self.focal_alpha_obj_score = focal_alpha_obj_score
         self.focal_gamma_obj_score = focal_gamma_obj_score
@@ -205,7 +273,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         assert len(object_score_logits_list) == len(ious_list)
 
         # accumulate the loss over prediction steps
-        losses = {"loss_mask": 0, "loss_dice": 0, "loss_iou": 0, "loss_class": 0}
+        losses = {"loss_mask": 0, "loss_dice": 0, "loss_cldice": 0, "loss_iou": 0, "loss_class": 0}
         for src_masks, ious, object_score_logits in zip(
             src_masks_list, ious_list, object_score_logits_list
         ):
@@ -229,6 +297,9 @@ class MultiStepMultiMasksAndIous(nn.Module):
             loss_on_multimask=True,
         )
         loss_multidice = dice_loss(
+            src_masks, target_masks, num_objects, loss_on_multimask=True
+        )
+        loss_multicldice = cldice_loss(
             src_masks, target_masks, num_objects, loss_on_multimask=True
         )
         if not self.pred_obj_scores:
@@ -269,11 +340,13 @@ class MultiStepMultiMasksAndIous(nn.Module):
             loss_combo = (
                 loss_multimask * self.weight_dict["loss_mask"]
                 + loss_multidice * self.weight_dict["loss_dice"]
+                + loss_multicldice * self.weight_dict["loss_cldice"]
             )
             best_loss_inds = torch.argmin(loss_combo, dim=-1)
             batch_inds = torch.arange(loss_combo.size(0), device=loss_combo.device)
             loss_mask = loss_multimask[batch_inds, best_loss_inds].unsqueeze(1)
             loss_dice = loss_multidice[batch_inds, best_loss_inds].unsqueeze(1)
+            loss_cldice = loss_multicldice[batch_inds, best_loss_inds].unsqueeze(1)
             # calculate the iou prediction and slot losses only in the index
             # with the minimum loss for each mask (to be consistent w/ SAM)
             if self.supervise_all_iou:
@@ -283,16 +356,19 @@ class MultiStepMultiMasksAndIous(nn.Module):
         else:
             loss_mask = loss_multimask
             loss_dice = loss_multidice
+            loss_cldice = loss_multicldice
             loss_iou = loss_multiiou
 
         # backprop focal, dice and iou loss only if obj present
         loss_mask = loss_mask * target_obj
         loss_dice = loss_dice * target_obj
+        loss_cldice = loss_cldice * target_obj
         loss_iou = loss_iou * target_obj
 
         # sum over batch dimension (note that the losses are already divided by num_objects)
         losses["loss_mask"] += loss_mask.sum()
         losses["loss_dice"] += loss_dice.sum()
+        losses["loss_cldice"] += loss_cldice.sum()
         losses["loss_iou"] += loss_iou.sum()
         losses["loss_class"] += loss_class
 

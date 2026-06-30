@@ -711,6 +711,21 @@ class Trainer:
 
     def train_epoch(self, train_loader):
 
+        curriculum_epoch = 50
+
+        for key in self.loss:
+            if hasattr(self.loss[key], 'weight_dict') and "loss_cldice" in self.loss[key].weight_dict:
+                if self.epoch >= curriculum_epoch:
+                    # Phase 2: Activate clDice and slightly reduce the weight of the bulk mask loss
+                    if self.loss[key].weight_dict["loss_cldice"] == 0.0:
+                        print(f"\n---> [Epoch {self.epoch}] Curriculum Phase 2: Activating clDice Topology Loss!")
+
+                    self.loss[key].weight_dict["loss_cldice"] = 2.0
+                    self.loss[key].weight_dict["loss_mask"] = 10.0 # Relax the pixel-wise penalty to favor topology
+                else:
+                    # Phase 1: Keep topology loss off
+                    self.loss[key].weight_dict["loss_cldice"] = 0.0
+
         # Init stat meters
         batch_time_meter = AverageMeter("Batch Time", self.device, ":.2f")
         data_time_meter = AverageMeter("Data Time", self.device, ":.2f")
