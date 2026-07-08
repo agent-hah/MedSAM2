@@ -1,5 +1,5 @@
 """
-Inference Script for MedSAM2 on Mouse Data for DIAS Analysis
+Inference Script for MedSAM2 on Human Data for DIAS Analysis
 """
 
 import numpy as np
@@ -202,20 +202,14 @@ def make_side_by_side_dias(img_gray, mask, label_left="Input", label_right="Pred
         img_uint8 = img_uint8[:, :, 0]
         
     # Apply CLAHE to improve contrast of the base image
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    img_clahe = clahe.apply(img_uint8)
+    # Note: Removed CLAHE so the linear colorbar accurately reflects the image intensities
+    img_clahe = img_uint8
 
     left = cv2.cvtColor(img_clahe, cv2.COLOR_GRAY2BGR)
-    right = left.copy()
     
-    # Fill with semi-transparent red
-    overlay = right.copy()
-    overlay[mask > 0] = (0, 0, 255)
-    cv2.addWeighted(overlay, 0.5, right, 0.5, 0, right)
-    
-    # Add a thick red outline
-    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(right, contours, -1, (0, 0, 255), 2)
+    # Prediction as a binary mask (black background, white foreground)
+    right = np.zeros_like(left)
+    right[mask > 0] = (255, 255, 255)
     
     h, w = left.shape[:2]
 
@@ -235,6 +229,31 @@ def make_side_by_side_dias(img_gray, mask, label_left="Input", label_right="Pred
     # Add a thin white separator
     separator = np.ones((h, 2, 3), dtype=np.uint8) * 255
     combined = np.hstack([left, separator, right])
+    
+    # Add Color Bar at the bottom
+    bar_h = max(40, int(h * 0.08))
+    colorbar_img = np.zeros((bar_h, combined.shape[1], 3), dtype=np.uint8)
+    
+    # Draw gradient in the center 60% of the bar
+    pad_x = int(combined.shape[1] * 0.2)
+    bar_w = combined.shape[1] - 2 * pad_x
+    for x in range(bar_w):
+        val = int(255 * x / max(1, bar_w - 1))
+        cv2.line(colorbar_img, (pad_x + x, int(bar_h * 0.3)), (pad_x + x, int(bar_h * 0.7)), (val, val, val), 1)
+        
+    # Draw Min/Max text
+    v_min, v_max = 0.0, 1.0
+    text_min = f"Min: {v_min:.1f}"
+    text_max = f"Max: {v_max:.1f}"
+    
+    (min_w, _), _ = cv2.getTextSize(text_min, font, font_scale, thickness)
+    
+    # Text positioning
+    cv2.putText(colorbar_img, text_min, (pad_x - min_w - 10, int(bar_h * 0.65)), font, font_scale, (255, 255, 255), thickness)
+    cv2.putText(colorbar_img, text_max, (pad_x + bar_w + 10, int(bar_h * 0.65)), font, font_scale, (255, 255, 255), thickness)
+    
+    combined = np.vstack([combined, colorbar_img])
+    
     return combined
 
 
@@ -514,6 +533,7 @@ def process_sequence(seq_name: str, npz_path: str, model, output_base: str, wind
             label_right="Prediction"
         )
         cv2.imwrite(os.path.join(window_dir, "comparison.png"), slice_img)
+        cv2.imwrite(os.path.join(window_dir, "prediction_mask.png"), binary_mask * 255)
 
         if verbose:
             print(f"\n  Window [{w_start}, {w_end}) -> Target {target_idx}: {slice_voxels} voxels")
@@ -647,13 +667,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MedSAM2 Inference for DIAS Analysis")
     # Original args
     parser.add_argument("--input_dir", type=str,
-                        default="/home/ashmithandoo/projects/git/MedSAM2/data/ratdata_preprocessed/predictions/MoCo-300ep",
+                        default="/home/ashmithandoo/projects/git/MedSAM2/data/humandata_preprocessed/predictions/MoCo-300ep",
                         help="Directory containing preprocessed NPZ files")
     parser.add_argument("--model_path", type=str,
                         default="/home/ashmithandoo/projects/git/MedSAM2/models/medsam2_vit_t_b16.pt",
                         help="Path to MedSAM2 model weights")
     parser.add_argument("--output_base", type=str,
-                        default="/home/ashmithandoo/projects/git/MedSAM2/data/ratdata_preprocessed/predictions/MoCo-300ep_results",
+                        default="/home/ashmithandoo/projects/git/MedSAM2/data/humandata_preprocessed/predictions/MoCo-300ep_results",
                         help="Base directory for output")
     parser.add_argument("--model_type", type=str,
                         default=None,

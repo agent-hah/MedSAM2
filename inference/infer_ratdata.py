@@ -323,6 +323,7 @@ def run_inference(config_name, checkpoint_path, data_dir, output_dir, window_siz
                         label_right=f"Prediction"
                     )
                     cv2.imwrite(os.path.join(window_dir, "comparison.png"), slice_img)
+                    cv2.imwrite(os.path.join(window_dir, "prediction_mask.png"), segs_3D[w_mid] * 255)
 
             # ==========================================
             # SAVE OUTPUTS
@@ -338,7 +339,16 @@ def run_inference(config_name, checkpoint_path, data_dir, output_dir, window_siz
             )
             cv2.imwrite(os.path.join(seq_output_dir, "comparison.png"), summary_img)
 
-            # 3. Per-slice comparisons moved inside window loop
+            # 3. Per-slice comparisons
+            slices_dir = os.path.join(seq_output_dir, "slices")
+            os.makedirs(slices_dir, exist_ok=True)
+            for i in range(D):
+                slice_img = make_side_by_side(
+                    img_3D_ori[i], segs_3D[i],
+                    label_left=f"Slice {i}/{D-1}",
+                    label_right="Prediction"
+                )
+                cv2.imwrite(os.path.join(slices_dir, f"slice_{i:04d}.png"), slice_img)
 
             # Track summary statistics (no metrics, just counts)
             n_positive_slices = int(np.any(segs_3D, axis=(1, 2)).sum())

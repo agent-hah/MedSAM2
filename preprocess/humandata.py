@@ -26,6 +26,8 @@ import cv2
 import pydicom
 from tqdm import tqdm
 
+import utils.preprocess as preprocess_utils
+
 
 # ===========================================================================
 # Utility helpers
@@ -102,7 +104,7 @@ def is_multiframe(dcm_path: str) -> bool:
 # Processing functions
 # ===========================================================================
 
-def process_multiframe_dicom(dcm_path: str, image_size: int) -> np.ndarray:
+def process_multiframe_dicom(dcm_path: str, image_size: int, seq_name: str, args) -> np.ndarray:
     """Process a single multi-frame DICOM into a (D, image_size, image_size) uint8 volume."""
     pixel_array = read_dicom_pixel_array(dcm_path)
 
@@ -115,12 +117,29 @@ def process_multiframe_dicom(dcm_path: str, image_size: int) -> np.ndarray:
     if pixel_array.ndim == 2:
         pixel_array = pixel_array[np.newaxis, :, :]
 
-    volume = normalize_to_uint8(pixel_array)
+    # Get interactive ROI
+    roi = preprocess_utils.get_crop_roi(
+        pixel_array, seq_name, clear_cache=args.clear_cache
+    )
+    
+    processed_frames = []
+    for frame in pixel_array:
+        frame_cropped = preprocess_utils.crop_image(frame, roi)
+        frame_processed = preprocess_utils.apply_full_preprocessing(
+            frame_cropped,
+            window_center=args.window_center,
+            window_width=args.window_width,
+            tv_weight=args.tv_weight,
+            use_frangi=not args.no_frangi
+        )
+        processed_frames.append(frame_processed)
+
+    volume = np.stack(processed_frames, axis=0)
     volume = resize_volume(volume, image_size)
     return volume
 
 
-def process_singleframe_directory(dcm_paths: list, image_size: int) -> np.ndarray:
+def process_singleframe_directory(dcm_paths: list, image_size: int, seq_name: str, args) -> np.ndarray:
     """Process a directory of single-frame DICOMs into a (D, image_size, image_size) uint8 volume.
 
     Files are sorted by filename so frames are in the correct temporal order.
@@ -142,9 +161,27 @@ def process_singleframe_directory(dcm_paths: list, image_size: int) -> np.ndarra
 
     if not frames:
         return None
+        
+    volume_raw = np.stack(frames, axis=0)
+    
+    # Get interactive ROI
+    roi = preprocess_utils.get_crop_roi(
+        volume_raw, seq_name, clear_cache=args.clear_cache
+    )
+    
+    processed_frames = []
+    for frame in volume_raw:
+        frame_cropped = preprocess_utils.crop_image(frame, roi)
+        frame_processed = preprocess_utils.apply_full_preprocessing(
+            frame_cropped,
+            window_center=args.window_center,
+            window_width=args.window_width,
+            tv_weight=args.tv_weight,
+            use_frangi=not args.no_frangi
+        )
+        processed_frames.append(frame_processed)
 
-    volume = np.stack(frames, axis=0)
-    volume = normalize_to_uint8(volume)
+    volume = np.stack(processed_frames, axis=0)
     volume = resize_volume(volume, image_size)
     return volume
 
@@ -161,7 +198,12 @@ def extract_and_find_dcms(zip_path: str, tmp_dir: str) -> list:
 # Main pipeline
 # ===========================================================================
 
-def preprocess_humandata(input_dir: str, output_dir: str, image_size: int, dsa_only: bool = True):
+def preprocess_humandata(args):
+    input_dir = args.input_dir
+    output_dir = args.output_dir
+    image_size = args.image_size
+    dsa_only = not args.process_all
+    
     """Walk the HumanData directory tree, convert all DICOMs to NPZ files."""
     os.makedirs(output_dir, exist_ok=True)
 
@@ -226,7 +268,7 @@ def preprocess_humandata(input_dir: str, output_dir: str, image_size: int, dsa_o
                         print(f"  ⏭ Already exists: {npz_name}")
                         continue
 
-                    volume = process_multiframe_dicom(dcm_path, image_size)
+                    volume = process_multiframe_dicom(dcm_path, image_size, npz_name, args)
                     np.savez_compressed(out_path, imgs=volume)
                     npz_created += 1
             else:
@@ -238,7 +280,7 @@ def preprocess_humandata(input_dir: str, output_dir: str, image_size: int, dsa_o
                     print(f"  ⏭ Already exists: {npz_name}")
                     continue
 
-                volume = process_singleframe_directory(dcm_files, image_size)
+                volume = process_singleframe_directory(dcm_files, image_size, npz_name, args)
                 if volume is not None:
                     np.savez_compressed(out_path, imgs=volume)
                     npz_created += 1
@@ -286,12 +328,12 @@ def preprocess_humandata(input_dir: str, output_dir: str, image_size: int, dsa_o
                                 stem = os.path.splitext(os.path.basename(dcm_path))[0]
                                 sub_npz_name = derive_npz_name_from_path(rel_dir, f"{zip_stem}__{stem}")
                                 sub_out_path = os.path.join(output_dir, sub_npz_name)
-                                volume = process_multiframe_dicom(dcm_path, image_size)
+                                volume = process_multiframe_dicom(dcm_path, image_size, sub_npz_name, args)
                                 np.savez_compressed(sub_out_path, imgs=volume)
                                 npz_created += 1
                         else:
                             # All extracted DICOMs → one NPZ
-                            volume = process_singleframe_directory(dcm_files, image_size)
+                            volume = process_singleframe_directory(dcm_files, image_size, npz_name, args)
                             if volume is not None:
                                 np.savez_compressed(out_path, imgs=volume)
                                 npz_created += 1
@@ -350,6 +392,11 @@ if __name__ == "__main__":
         action="store_true",
         help="If set, process all data instead of filtering for 'dsa' files",
     )
+    parser.add_argument("--clear_cache", action="store_true", help="Clear the ROI cache")
+    parser.add_argument("--window_center", type=float, default=None, help="Window center for DICOM")
+    parser.add_argument("--window_width", type=float, default=None, help="Window width for DICOM")
+    parser.add_argument("--tv_weight", type=float, default=0.1, help="Total variation denoising weight")
+    parser.add_argument("--no_frangi", action="store_true", help="Disable Frangi/Hessian filtering")
 
     args = parser.parse_args()
-    preprocess_humandata(args.input_dir, args.output_dir, args.image_size, not args.process_all)
+    preprocess_humandata(args)
