@@ -27,12 +27,13 @@ def resize_grayscale_to_rgb_and_resize(array, image_size):
 
 def get_mip_guided_prompt(volume_3d, mid_idx):
     """
-    Uses a 2.5D Maximum Intensity Projection to find the global center of the
+    Uses a 2.5D Minimum Intensity Projection to find the global center of the
     arterial tree, then maps that coordinate to the middle slice to extract
     safe, verified 5-point prompts.
     """
-    # 1. Generate the 2.5D MIP across the entire Z-axis (Depth)
-    mip_2d = np.max(volume_3d, axis=0)
+    # 1. Generate the 2.5D MinIP across the entire Z-axis (Depth)
+    # Vessels appear dark, so minimum intensity projection captures them better
+    mip_2d = np.min(volume_3d, axis=0)
 
     # Helper function to extract contours
     def get_contours(img_slice):

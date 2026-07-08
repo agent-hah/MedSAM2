@@ -17,3 +17,15 @@ wget-log
 *.so
 sam2/_C.so
 data/medsam_preprocessed/DIAS_Scribble_RDFA_NPZ
+RatData/
+data/medsam_preprocessed/RatData_NPZ/
+all_dias_models.txt
+generate_runners.py
+results/
+temp_wistar.txt
+temp_zips.txt
+HumanData/
+Human*
+HumanData.zip
+RatData.zip
+results*/
