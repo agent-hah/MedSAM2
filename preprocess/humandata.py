@@ -119,7 +119,7 @@ def process_multiframe_dicom(dcm_path: str, image_size: int, seq_name: str, args
 
     # Get interactive ROI
     roi = preprocess_utils.get_crop_roi(
-        pixel_array, seq_name, clear_cache=args.clear_cache
+        pixel_array, seq_name, clear_cache=args.clear_cache, skip_cropping=args.skip_cropping
     )
     
     processed_frames = []
@@ -166,7 +166,7 @@ def process_singleframe_directory(dcm_paths: list, image_size: int, seq_name: st
     
     # Get interactive ROI
     roi = preprocess_utils.get_crop_roi(
-        volume_raw, seq_name, clear_cache=args.clear_cache
+        volume_raw, seq_name, clear_cache=args.clear_cache, skip_cropping=args.skip_cropping
     )
     
     processed_frames = []
@@ -264,7 +264,7 @@ def preprocess_humandata(args):
                     npz_name = derive_npz_name_from_path(rel_dir, stem)
                     out_path = os.path.join(output_dir, npz_name)
 
-                    if os.path.exists(out_path):
+                    if not args.overwrite and os.path.exists(out_path):
                         print(f"  ⏭ Already exists: {npz_name}")
                         continue
 
@@ -276,7 +276,7 @@ def preprocess_humandata(args):
                 npz_name = derive_npz_name_from_path(rel_dir)
                 out_path = os.path.join(output_dir, npz_name)
 
-                if os.path.exists(out_path):
+                if not args.overwrite and os.path.exists(out_path):
                     print(f"  ⏭ Already exists: {npz_name}")
                     continue
 
@@ -310,7 +310,7 @@ def preprocess_humandata(args):
                 npz_name = derive_npz_name_from_path(rel_dir, zip_stem)
                 out_path = os.path.join(output_dir, npz_name)
 
-                if os.path.exists(out_path):
+                if not args.overwrite and os.path.exists(out_path):
                     print(f"  ⏭ Already exists: {npz_name}")
                     continue
 
@@ -365,38 +365,40 @@ def preprocess_humandata(args):
     print("=" * 55)
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Convert HumanData DICOMs to MedSAM2-compatible NPZ files"
-    )
-    parser.add_argument(
-        "--input_dir",
-        type=str,
-        default=os.path.join("data", "medsam_preprocessed", "HumanData", "HumanData"),
-        help="Path to the root HumanData directory",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=os.path.join("data", "medsam_preprocessed", "HumanData_NPZ"),
-        help="Path to the output directory for NPZ files",
-    )
-    parser.add_argument(
-        "--image_size",
-        type=int,
-        default=512,
-        help="Target spatial resolution (default: 512)",
-    )
-    parser.add_argument(
-        "--process_all",
-        action="store_true",
-        help="If set, process all data instead of filtering for 'dsa' files",
-    )
-    parser.add_argument("--clear_cache", action="store_true", help="Clear the ROI cache")
-    parser.add_argument("--window_center", type=float, default=None, help="Window center for DICOM")
-    parser.add_argument("--window_width", type=float, default=None, help="Window width for DICOM")
-    parser.add_argument("--tv_weight", type=float, default=0.1, help="Total variation denoising weight")
-    parser.add_argument("--no_frangi", action="store_true", help="Disable Frangi/Hessian filtering")
+parser = argparse.ArgumentParser(
+    description="Convert HumanData DICOMs to MedSAM2-compatible NPZ files"
+)
+parser.add_argument(
+    "--input_dir",
+    type=str,
+    default=os.path.join("data", "medsam_preprocessed", "HumanData", "HumanData"),
+    help="Path to the root HumanData directory",
+)
+parser.add_argument(
+    "--output_dir",
+    type=str,
+    default=os.path.join("data", "medsam_preprocessed", "HumanData_NPZ"),
+    help="Path to the output directory for NPZ files",
+)
+parser.add_argument(
+    "--image_size",
+    type=int,
+    default=512,
+    help="Target spatial resolution (default: 512)",
+)
+parser.add_argument(
+    "--process_all",
+    action="store_true",
+    help="If set, process all data instead of filtering for 'dsa' files",
+)
+parser.add_argument("--clear_cache", action="store_true", help="Clear the ROI cache")
+parser.add_argument("--window_center", type=float, default=None, help="Window center for DICOM")
+parser.add_argument("--window_width", type=float, default=None, help="Window width for DICOM")
+parser.add_argument("--tv_weight", type=float, default=0.1, help="Total variation denoising weight")
+parser.add_argument("--no_frangi", action="store_true", help="Disable Frangi/Hessian filtering")
+parser.add_argument("--skip-cropping", action="store_true", help="Skip the cropping step entirely")
+parser.add_argument("--overwrite", action="store_true", help="Overwrite existing NPZ files")
 
+if __name__ == "__main__":
     args = parser.parse_args()
     preprocess_humandata(args)

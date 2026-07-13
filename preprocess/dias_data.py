@@ -63,7 +63,7 @@ def preprocess_dias_for_medsam2(base_data_dir, output_dir, label_type="standard"
         # --- Optional Preprocessing with utils ---
         if len(sequence_imgs) > 0 and args is not None:
             roi = preprocess_utils.get_crop_roi(
-                sequence_imgs, f"DIAS_s{seq_id}", clear_cache=args.clear_cache
+                sequence_imgs, f"DIAS_s{seq_id}", clear_cache=args.clear_cache, skip_cropping=getattr(args, 'skip_cropping', False)
             )
             
             processed_imgs = []
@@ -109,16 +109,18 @@ def preprocess_dias_for_medsam2(base_data_dir, output_dir, label_type="standard"
         np.savez_compressed(os.path.join(save_dir, f"s{seq_id}.npz"), imgs=imgs_np, gts=gts_np)
 
 
+parser = argparse.ArgumentParser(description="Convert DIAS dataset to NPZ with preprocessing")
+parser.add_argument("--base_data_dir", type=str, default=os.path.expanduser("~/projects/lab/DIAS/d_data/DIAS/training"))
+parser.add_argument("--output_dir", type=str, default=os.path.expanduser("~/projects/git/MedSAM2/data/medsam_preprocessed"))
+parser.add_argument("--clear_cache", action="store_true", help="Clear the ROI cache")
+parser.add_argument("--window_center", type=float, default=None, help="Window center")
+parser.add_argument("--window_width", type=float, default=None, help="Window width")
+parser.add_argument("--tv_weight", type=float, default=0.1, help="Total variation denoising weight")
+parser.add_argument("--no_frangi", action="store_true", help="Disable Frangi/Hessian filtering")
+parser.add_argument("--skip-cropping", action="store_true", help="Skip the cropping step entirely")
+parser.add_argument("--overwrite", action="store_true", help="Overwrite existing NPZ files")
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert DIAS dataset to NPZ with preprocessing")
-    parser.add_argument("--base_data_dir", type=str, default=os.path.expanduser("~/projects/lab/DIAS/d_data/DIAS/training"))
-    parser.add_argument("--output_dir", type=str, default=os.path.expanduser("~/projects/git/MedSAM2/data/medsam_preprocessed"))
-    parser.add_argument("--clear_cache", action="store_true", help="Clear the ROI cache")
-    parser.add_argument("--window_center", type=float, default=None, help="Window center")
-    parser.add_argument("--window_width", type=float, default=None, help="Window width")
-    parser.add_argument("--tv_weight", type=float, default=0.1, help="Total variation denoising weight")
-    parser.add_argument("--no_frangi", action="store_true", help="Disable Frangi/Hessian filtering")
-    
     args = parser.parse_args()
 
     # Process all three label types

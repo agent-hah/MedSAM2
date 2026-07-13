@@ -49,12 +49,16 @@ def apply_frangi_filter(image):
         
     return filtered.astype(np.uint8)
 
-def get_crop_roi(sequence_frames, seq_name, cache_file="crop_cache.json", clear_cache=False):
+def get_crop_roi(sequence_frames, seq_name, cache_file="crop_cache.json", clear_cache=False, skip_cropping=False):
     """
     Gets cropping coordinates (x, y, w, h) for a sequence.
     If cached, returns the cached coordinates.
     Otherwise, pops up an interactive cv2 window to let the user scrub through frames and select the ROI.
     """
+    if skip_cropping:
+        h, w = sequence_frames[0].shape[:2]
+        return [0, 0, w, h]
+
     cache = {}
     if not clear_cache and os.path.exists(cache_file):
         with open(cache_file, "r") as f:
@@ -88,6 +92,15 @@ def get_crop_roi(sequence_frames, seq_name, cache_file="crop_cache.json", clear_
     print("Press 'c' to cancel/skip crop entirely.")
     
     h, w = display_frames[0].shape[:2]
+    
+    if not os.environ.get("DISPLAY"):
+        print(f"No display found. Skipping interactive ROI selection for {seq_name}.")
+        final_roi = [0, 0, w, h]
+        cache[seq_name] = final_roi
+        with open(cache_file, "w") as f:
+            json.dump(cache, f, indent=4)
+        return final_roi
+        
     max_dim = 800
     scale = 1.0
     if h > max_dim or w > max_dim:
@@ -166,7 +179,10 @@ def apply_full_preprocessing(image, window_center=None, window_width=None, tv_we
     else:
         # If no window given but it's raw dicom, just min-max normalize
         if img.max() > 255:
-            img = ((img - img.min()) / (img.max() - img.min()) * 255).astype(np.uint8)
+            if img.max() == img.min():
+                img = np.zeros_like(img, dtype=np.uint8)
+            else:
+                img = ((img - img.min()) / (img.max() - img.min()) * 255).astype(np.uint8)
         else:
             img = img.astype(np.uint8)
             
