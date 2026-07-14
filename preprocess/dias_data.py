@@ -74,7 +74,8 @@ def preprocess_dias_for_medsam2(base_data_dir, output_dir, label_type="standard"
                     window_center=args.window_center,
                     window_width=args.window_width,
                     tv_weight=args.tv_weight,
-                    use_frangi=not args.no_frangi
+                    use_frangi=args.use_frangi,
+                    use_clahe=not args.no_clahe
                 )
                 processed_imgs.append(cv2.resize(processed, (512, 512), interpolation=cv2.INTER_LINEAR))
             sequence_imgs = processed_imgs
@@ -115,8 +116,9 @@ parser.add_argument("--output_dir", type=str, default=os.path.expanduser("~/proj
 parser.add_argument("--clear_cache", action="store_true", help="Clear the ROI cache")
 parser.add_argument("--window_center", type=float, default=None, help="Window center")
 parser.add_argument("--window_width", type=float, default=None, help="Window width")
-parser.add_argument("--tv_weight", type=float, default=0.1, help="Total variation denoising weight")
-parser.add_argument("--no_frangi", action="store_true", help="Disable Frangi/Hessian filtering")
+parser.add_argument("--tv_weight", type=float, default=0.0, help="Total variation denoising weight")
+parser.add_argument("--use_frangi", action="store_true", help="Enable Frangi/Hessian filtering")
+parser.add_argument("--no_clahe", action="store_true", help="Disable CLAHE filtering")
 parser.add_argument("--skip-cropping", action="store_true", help="Skip the cropping step entirely")
 parser.add_argument("--overwrite", action="store_true", help="Overwrite existing NPZ files")
 

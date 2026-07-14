@@ -29,3 +29,7 @@ Human*
 HumanData.zip
 RatData.zip
 results*/
+*.png
+generate_pptx.py
+*.ipynb
+find_perfect_threshold.py

@@ -33,6 +33,20 @@ import utils.preprocess as preprocess_utils
 # Utility helpers
 # ===========================================================================
 
+def is_dicom_file(filepath: str) -> bool:
+    """Check if a file is a DICOM file by checking extension or magic bytes."""
+    if filepath.lower().endswith(".dcm"):
+        return True
+    if filepath.endswith(".Identifier") or filepath.endswith(".JPG") or filepath.endswith(".zip") or filepath.endswith(".npz"):
+        return False
+    try:
+        with open(filepath, "rb") as f:
+            f.seek(128)
+            return f.read(4) == b"DICM"
+    except Exception:
+        return False
+
+
 def sanitize_name(name: str) -> str:
     """Replace spaces, dashes, and other non-alphanumeric chars with underscores,
     then collapse multiple underscores and strip leading/trailing ones."""
@@ -130,7 +144,8 @@ def process_multiframe_dicom(dcm_path: str, image_size: int, seq_name: str, args
             window_center=args.window_center,
             window_width=args.window_width,
             tv_weight=args.tv_weight,
-            use_frangi=not args.no_frangi
+            use_frangi=args.use_frangi,
+            use_clahe=not args.no_clahe
         )
         processed_frames.append(frame_processed)
 
@@ -140,11 +155,21 @@ def process_multiframe_dicom(dcm_path: str, image_size: int, seq_name: str, args
 
 
 def process_singleframe_directory(dcm_paths: list, image_size: int, seq_name: str, args) -> np.ndarray:
-    """Process a directory of single-frame DICOMs into a (D, image_size, image_size) uint8 volume.
+    """Process a directory of single-frame DICOMs into a (D, image_size, image_size) uint8 volume."""
+    def get_sort_key(path):
+        try:
+            ds = pydicom.dcmread(path, stop_before_pixels=True)
+            inst = getattr(ds, "InstanceNumber", None)
+            if inst is not None:
+                return (int(inst), path)
+        except Exception:
+            pass
+        # Fallback to natural sort on filename
+        match = re.search(r'(\d+)', os.path.basename(path))
+        num = int(match.group(1)) if match else 0
+        return (num, path)
 
-    Files are sorted by filename so frames are in the correct temporal order.
-    """
-    dcm_paths = sorted(dcm_paths)
+    dcm_paths = sorted(dcm_paths, key=get_sort_key)
     frames = []
     for path in dcm_paths:
         try:
@@ -177,7 +202,8 @@ def process_singleframe_directory(dcm_paths: list, image_size: int, seq_name: st
             window_center=args.window_center,
             window_width=args.window_width,
             tv_weight=args.tv_weight,
-            use_frangi=not args.no_frangi
+            use_frangi=args.use_frangi,
+            use_clahe=not args.no_clahe
         )
         processed_frames.append(frame_processed)
 
@@ -187,10 +213,15 @@ def process_singleframe_directory(dcm_paths: list, image_size: int, seq_name: st
 
 
 def extract_and_find_dcms(zip_path: str, tmp_dir: str) -> list:
-    """Extract a zip file and return a list of .dcm file paths found inside."""
+    """Extract a zip file and return a list of DICOM file paths found inside."""
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(tmp_dir)
-    dcm_files = glob.glob(os.path.join(tmp_dir, "**", "*.dcm"), recursive=True)
+    dcm_files = []
+    for root, _, files in os.walk(tmp_dir):
+        for f in files:
+            full_path = os.path.join(root, f)
+            if is_dicom_file(full_path):
+                dcm_files.append(full_path)
     return sorted(dcm_files)
 
 
@@ -215,10 +246,10 @@ def preprocess_humandata(args):
     for root, dirs, files in os.walk(input_dir):
         for f in files:
             full_path = os.path.join(root, f)
-            if f.lower().endswith(".dcm"):
-                dcm_by_dir[root].append(full_path)
-            elif f.lower().endswith(".zip"):
+            if f.lower().endswith(".zip"):
                 zip_files.append(full_path)
+            elif is_dicom_file(full_path):
+                dcm_by_dir[root].append(full_path)
 
     total_dcm_dirs = len(dcm_by_dir)
     total_zips = len(zip_files)
@@ -236,6 +267,17 @@ def preprocess_humandata(args):
     for dir_path, files in dcm_by_dir.items():
         rel_dir = os.path.relpath(dir_path, input_dir)
         has_dsa = "dsa" in rel_dir.lower() or any("dsa" in os.path.basename(f).lower() for f in files)
+        
+        if dsa_only and not has_dsa and files:
+            try:
+                ds = pydicom.dcmread(files[0], stop_before_pixels=True)
+                desc = getattr(ds, "SeriesDescription", "").lower()
+                prot = getattr(ds, "ProtocolName", "").lower()
+                if "dsa" in desc or "dsa" in prot:
+                    has_dsa = True
+            except Exception:
+                pass
+                
         if not dsa_only or has_dsa:
             target_dirs.append(dir_path)
             
@@ -253,12 +295,16 @@ def preprocess_humandata(args):
             if multiframe:
                 # Each multi-frame DICOM → one NPZ
                 for dcm_path in sorted(dcm_files):
-                    if not dcm_path.lower().endswith(".dcm"):
-                        continue
-                    
                     # If the directory doesn't have 'dsa', ensure this specific file does, if dsa_only is True
                     if dsa_only and "dsa" not in rel_dir.lower() and "dsa" not in os.path.basename(dcm_path).lower():
-                        continue
+                        try:
+                            ds = pydicom.dcmread(dcm_path, stop_before_pixels=True)
+                            desc = getattr(ds, "SeriesDescription", "").lower()
+                            prot = getattr(ds, "ProtocolName", "").lower()
+                            if "dsa" not in desc and "dsa" not in prot:
+                                continue
+                        except Exception:
+                            continue
 
                     stem = os.path.splitext(os.path.basename(dcm_path))[0]
                     npz_name = derive_npz_name_from_path(rel_dir, stem)
@@ -394,8 +440,9 @@ parser.add_argument(
 parser.add_argument("--clear_cache", action="store_true", help="Clear the ROI cache")
 parser.add_argument("--window_center", type=float, default=None, help="Window center for DICOM")
 parser.add_argument("--window_width", type=float, default=None, help="Window width for DICOM")
-parser.add_argument("--tv_weight", type=float, default=0.1, help="Total variation denoising weight")
-parser.add_argument("--no_frangi", action="store_true", help="Disable Frangi/Hessian filtering")
+parser.add_argument("--tv_weight", type=float, default=0.0, help="Total variation denoising weight")
+parser.add_argument("--use_frangi", action="store_true", help="Enable Frangi/Hessian filtering")
+parser.add_argument("--no_clahe", action="store_true", help="Disable CLAHE filtering")
 parser.add_argument("--skip-cropping", action="store_true", help="Skip the cropping step entirely")
 parser.add_argument("--overwrite", action="store_true", help="Overwrite existing NPZ files")
 

@@ -3,11 +3,11 @@ Inference script for HumanData (no ground truth).
 
 Mirrors the original HumanData directory structure in the output, producing
 for each NPZ volume:
-  - A side-by-side comparison PNG of the input MinIP and the prediction overlay
+  - A side-by-side comparison PNG of the input MIP and the prediction overlay
   - Per-slice comparison PNGs (input slice | prediction overlay) in a subfolder
   - The raw 3D segmentation mask as a .npy file
 
-Uses the same MinIP-guided automatic prompting as evaluate_medsam2.py, but with a
+Uses the same MIP-guided automatic prompting as evaluate_medsam2.py, but with a
 sliding window approach for prompting: the entire sequence is loaded as context, but
 prompts are placed at the center of each sliding window and propagation is confined
 to that window, keeping error propagation localized.
@@ -52,7 +52,7 @@ def resize_grayscale_to_rgb_and_resize(array, image_size):
 
 def get_mip_guided_prompt(volume_3d, frame_idx):
     """
-    Uses a 2.5D Minimum Intensity Projection to find the global center of the
+    Uses a 2.5D Maximum Intensity Projection to find the global center of the
     arterial tree, then maps that coordinate to the specified slice to extract
     safe, verified 5-point prompts.
     
@@ -60,7 +60,7 @@ def get_mip_guided_prompt(volume_3d, frame_idx):
         volume_3d: 3D volume array
         frame_idx: The frame index to use for contour detection
     """
-    # 1. Generate the 2.5D MinIP across the entire Z-axis (Depth)
+    # 1. Generate the 2.5D MIP across the entire Z-axis (Depth)
     # Vessels appear dark, so minimum intensity projection captures them better
     mip_2d = np.min(volume_3d, axis=0)
 
@@ -123,8 +123,8 @@ def get_mip_guided_prompt(volume_3d, frame_idx):
         pts = [[best_cx, best_cy], extLeft, extRight, extTop, extBottom]
         return np.array(pts, dtype=np.float32), np.array([1, 1, 1, 1, 1], dtype=np.int32)
     else:
-        # Absolute fallback if the frame is mysteriously empty
-        return np.array([[mip_cx, mip_cy]], dtype=np.float32), np.array([1], dtype=np.int32)
+        # No vessels detected on this slice
+        return None, None
 
 
 # ============================================================================
@@ -132,10 +132,14 @@ def get_mip_guided_prompt(volume_3d, frame_idx):
 # ============================================================================
 
 def make_side_by_side(img_gray, mask, label_left="Input", label_right="Prediction"):
-    """Create a side-by-side comparison: input (left) | prediction overlay (right)."""
-    ptp = img_gray.max() - img_gray.min()
+    """Create a side-by-side comparison: input with colorbar (left) | B&W mask with colorbar (right)."""
+    # Compute real min/max from the original image data before normalization
+    v_min = float(img_gray.min())
+    v_max = float(img_gray.max())
+    
+    ptp = v_max - v_min
     if ptp > 0:
-        img_uint8 = np.clip((img_gray - img_gray.min()) / ptp * 255, 0, 255).astype(np.uint8)
+        img_uint8 = np.clip((img_gray - v_min) / ptp * 255, 0, 255).astype(np.uint8)
     else:
         img_uint8 = np.clip(img_gray, 0, 255).astype(np.uint8)
         
@@ -149,7 +153,7 @@ def make_side_by_side(img_gray, mask, label_left="Input", label_right="Predictio
     left = cv2.cvtColor(img_clahe, cv2.COLOR_GRAY2BGR)
     right = left.copy()
     
-    # Fill with semi-transparent red
+    # Red overlay for prediction
     overlay = right.copy()
     overlay[mask > 0] = (0, 0, 255)
     cv2.addWeighted(overlay, 0.5, right, 0.5, 0, right)
@@ -160,22 +164,46 @@ def make_side_by_side(img_gray, mask, label_left="Input", label_right="Predictio
     
     h, w = left.shape[:2]
 
-    # Add labels with black outline for readability
+    # Font settings
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = max(0.4, h / 800)
     thickness = max(1, int(h / 400))
     
-    # Left text (Yellow with black outline)
+    # Add labels with black outline for readability
     cv2.putText(left, label_left, (10, 25), font, font_scale, (0, 0, 0), thickness + 2)
     cv2.putText(left, label_left, (10, 25), font, font_scale, (0, 255, 255), thickness)
-    
-    # Right text (Yellow with black outline)
     cv2.putText(right, label_right, (10, 25), font, font_scale, (0, 0, 0), thickness + 2)
     cv2.putText(right, label_right, (10, 25), font, font_scale, (0, 255, 255), thickness)
 
-    # Add a thin white separator
+    # --- Vertical Color Bar ---
+    bar_w = max(20, int(w * 0.04))
+    pad_y = int(h * 0.1)
+    bar_h = h - 2 * pad_y
+    
+    def make_vertical_colorbar(panel_h, panel_w, val_min, val_max):
+        """Create a vertical colorbar image to append to the right of a panel."""
+        cbar_img = np.zeros((panel_h, bar_w + 40, 3), dtype=np.uint8)
+        # Draw vertical gradient (top = max, bottom = min)
+        for y in range(bar_h):
+            val = int(255 * (1.0 - y / max(1, bar_h - 1)))
+            cv2.line(cbar_img, (5, pad_y + y), (5 + bar_w, pad_y + y), (val, val, val), 1)
+        # Draw border around the gradient
+        cv2.rectangle(cbar_img, (5, pad_y), (5 + bar_w, pad_y + bar_h), (200, 200, 200), 1)
+        # Max label (top)
+        text_max = f"{val_max:.1f}"
+        cv2.putText(cbar_img, text_max, (5, pad_y - 5), font, font_scale * 0.7, (255, 255, 255), max(1, thickness - 1))
+        # Min label (bottom)
+        text_min = f"{val_min:.1f}"
+        cv2.putText(cbar_img, text_min, (5, pad_y + bar_h + int(font_scale * 15) + 5), font, font_scale * 0.7, (255, 255, 255), max(1, thickness - 1))
+        return cbar_img
+    
+    # Both colorbars show the actual image intensity range
+    left_cbar = make_vertical_colorbar(h, w, v_min, v_max)
+    right_cbar = make_vertical_colorbar(h, w, v_min, v_max)
+
+    # Assemble: [left | left_cbar | separator | right | right_cbar]
     separator = np.ones((h, 2, 3), dtype=np.uint8) * 255
-    combined = np.hstack([left, separator, right])
+    combined = np.hstack([left, left_cbar, separator, right, right_cbar])
     return combined
 
 
@@ -218,10 +246,6 @@ def run_inference(config_name, checkpoint_path, data_dir, output_dir, window_siz
             mirror_subdir = npz_name_to_subdir(filename)
             seq_output_dir = os.path.join(output_dir, mirror_subdir)
             os.makedirs(seq_output_dir, exist_ok=True)
-            
-            # Create windows subdirectory
-            windows_base_dir = os.path.join(seq_output_dir, "windows")
-            os.makedirs(windows_base_dir, exist_ok=True)
 
             # Load images (no ground truth expected)
             data = np.load(file_path, allow_pickle=True)
@@ -235,12 +259,10 @@ def run_inference(config_name, checkpoint_path, data_dir, output_dir, window_siz
             img_resized = img_resized / 255.0
             img_resized = torch.from_numpy(img_resized).cuda()
 
-            dias_mean = 0.5371
-            dias_std = 0.2546
-            img_mean = torch.tensor((dias_mean, dias_mean, dias_mean), dtype=torch.float32)[:, None, None].cuda()
-            img_std = torch.tensor((dias_std, dias_std, dias_std), dtype=torch.float32)[:, None, None].cuda()
-            img_resized -= img_mean
-            img_resized /= img_std
+            # Z-score normalization (computed per-sequence at inference time)
+            seq_mean = img_resized.mean()
+            seq_std = img_resized.std() + 1e-8
+            img_resized = (img_resized - seq_mean) / seq_std
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 inference_state = predictor.init_state(img_resized, video_height, video_width)
@@ -249,95 +271,46 @@ def run_inference(config_name, checkpoint_path, data_dir, output_dir, window_siz
                 total_prompt_points = 0
                 
                 # ==========================================
-                # SLIDING WINDOW AUTOMATIC PROMPTING
+                # MULTI-FRAME AUTOMATIC PROMPTING
                 # ==========================================
-                all_window_starts = list(range(0, D, window_size))
-                center = D / 2
-                all_window_starts.sort(key=lambda x: abs((x + window_size/2) - center))
+                prompted_frames = []
+                for i in range(D):
+                    point_prompts, labels = get_mip_guided_prompt(img_3D_ori, i)
+                    
+                    if point_prompts is not None:
+                        total_prompt_points += len(point_prompts)
+                        _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
+                            inference_state=inference_state,
+                            frame_idx=i,
+                            obj_id=1,
+                            points=point_prompts,
+                            labels=labels
+                        )
+                        segs_3D[i] = (out_mask_logits[0] > 0.0).cpu().numpy()[0].astype(np.uint8)
+                        prompted_frames.append(i)
                 
-                target_count = min(8, len(all_window_starts))
-                valid_windows = []
-                empty_windows = []
-
-                for w_start in all_window_starts:
-                    w_end = min(w_start + window_size, D)
-                    w_mid = w_start + (w_end - w_start) // 2
-
-                    # Reset state so previous window's prompts are cleared
-                    predictor.reset_state(inference_state)
-
-                    point_prompts, labels = get_mip_guided_prompt(img_3D_ori, w_mid)
-                    total_prompt_points += len(point_prompts)
-
-                    _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
-                        inference_state=inference_state,
-                        frame_idx=w_mid,
-                        obj_id=1,
-                        points=point_prompts,
-                        labels=labels
-                    )
-                    mid_mask = (out_mask_logits[0] > 0.0).cpu().numpy()[0].astype(np.uint8)
-                    segs_3D[w_mid] = mid_mask
-
-                    has_prediction = (mid_mask.sum() > 0)
-                    window_info = {"w_start": w_start, "w_end": w_end, "w_mid": w_mid}
-
-                    if has_prediction:
-                        # Track Forward
-                        for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
-                                inference_state, start_frame_idx=w_mid, reverse=False
-                        ):
-                            if out_frame_idx >= w_end:
-                                break
-                            segs_3D[out_frame_idx] = (out_mask_logits[0] > 0.0).cpu().numpy()[0].astype(np.uint8)
-
-                        # Track Backward
-                        for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
-                                inference_state, start_frame_idx=w_mid, reverse=True
-                        ):
-                            if out_frame_idx < w_start:
-                                break
-                            segs_3D[out_frame_idx] = (out_mask_logits[0] > 0.0).cpu().numpy()[0].astype(np.uint8)
-                            
-                        valid_windows.append(window_info)
-                    else:
-                        empty_windows.append(window_info)
-
-                    if len(valid_windows) == target_count:
-                        break
-
-                selected_windows = valid_windows + empty_windows
-                selected_windows = selected_windows[:target_count]
-                selected_windows.sort(key=lambda x: x["w_start"])
-
-                for win in selected_windows:
-                    w_start = win["w_start"]
-                    w_mid = win["w_mid"]
-                    
-                    window_dir = os.path.join(windows_base_dir, f"window_{w_start:04d}")
-                    os.makedirs(window_dir, exist_ok=True)
-                    
-                    slice_img = make_side_by_side(
-                        img_3D_ori[w_mid], segs_3D[w_mid],
-                        label_left=f"Target Slice {w_mid}/{D-1}",
-                        label_right=f"Prediction"
-                    )
-                    cv2.imwrite(os.path.join(window_dir, "comparison.png"), slice_img)
-                    cv2.imwrite(os.path.join(window_dir, "prediction_mask.png"), segs_3D[w_mid] * 255)
+                # ==========================================
+                # VIDEO PROPAGATION PHASE (Global)
+                # ==========================================
+                if len(prompted_frames) > 0:
+                    for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
+                        segs_3D[out_frame_idx] = (out_mask_logits[0] > 0.0).cpu().numpy()[0].astype(np.uint8)
+                else:
+                    print(f"Warning: No vessels detected in any slice for {seq_id}")
 
             # ==========================================
             # SAVE OUTPUTS
             # ==========================================
 
-            # 1. Summary comparison (Middle frame of input vs. prediction overlay)
-            input_frame = img_3D_ori[D // 2]
-            pred_frame = segs_3D[D // 2]
+            # 1. Summary comparison (input vs. merged prediction mask)
+            input_minip = np.min(img_3D_ori, axis=0)
+            merged_mask = np.max(segs_3D, axis=0)
 
             summary_img = make_side_by_side(
-                input_frame, pred_frame,
-                label_left="Input (Middle Frame)", label_right="Prediction"
+                input_minip, merged_mask,
+                label_left="Input (middle frame)", label_right="Prediction"
             )
-            cv2.imwrite(os.path.join(seq_output_dir, "comparison.png"), summary_img)
+            cv2.imwrite(os.path.join(seq_output_dir, "summary_comparison.png"), summary_img)
 
             # 3. Per-slice comparisons
             slices_dir = os.path.join(seq_output_dir, "slices")
@@ -388,7 +361,7 @@ def run_inference(config_name, checkpoint_path, data_dir, output_dir, window_siz
     print("=" * 60)
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(
         description="Run MedSAM2 inference on HumanData and produce visual comparisons (no ground truth needed)"
     )
@@ -409,3 +382,6 @@ if __name__ == "__main__":
         data_dir=args.data_dir,
         output_dir=args.output_dir,
     )
+
+if __name__ == "__main__":
+    main()

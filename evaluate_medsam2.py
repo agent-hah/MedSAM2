@@ -27,11 +27,11 @@ def resize_grayscale_to_rgb_and_resize(array, image_size):
 
 def get_mip_guided_prompt(volume_3d, mid_idx):
     """
-    Uses a 2.5D Minimum Intensity Projection to find the global center of the
+    Uses a 2.5D Maximum Intensity Projection to find the global center of the
     arterial tree, then maps that coordinate to the middle slice to extract
     safe, verified 5-point prompts.
     """
-    # 1. Generate the 2.5D MinIP across the entire Z-axis (Depth)
+    # 1. Generate the 2.5D MIP across the entire Z-axis (Depth)
     # Vessels appear dark, so minimum intensity projection captures them better
     mip_2d = np.min(volume_3d, axis=0)
 
@@ -94,8 +94,8 @@ def get_mip_guided_prompt(volume_3d, mid_idx):
         pts = [[best_cx, best_cy], extLeft, extRight, extTop, extBottom]
         return np.array(pts, dtype=np.float32), np.array([1, 1, 1, 1, 1], dtype=np.int32)
     else:
-        # Absolute fallback if the middle slice is mysteriously empty
-        return np.array([[mip_cx, mip_cy]], dtype=np.float32), np.array([1], dtype=np.int32)
+        # No vessels detected on this slice
+        return None, None
 
 def run_inference_and_evaluate(config_name, checkpoint_path, test_data_dir, output_dir):
     # 1. Replicate DIAS Tester directory structure
@@ -141,54 +141,44 @@ def run_inference_and_evaluate(config_name, checkpoint_path, test_data_dir, outp
             img_resized = img_resized / 255.0
             img_resized = torch.from_numpy(img_resized).cuda()
 
-            dias_mean = 0.5371
-            dias_std = 0.2546
+            # Z-score normalization (computed per-sequence at inference time)
+            seq_mean = img_resized.mean()
+            seq_std = img_resized.std() + 1e-8
+            img_resized = (img_resized - seq_mean) / seq_std
 
-            img_mean = torch.tensor((dias_mean, dias_mean, dias_mean), dtype=torch.float32)[:, None, None].cuda()
-            img_std = torch.tensor((dias_std, dias_std, dias_std), dtype=torch.float32)[:, None, None].cuda()
-
-            img_resized -= img_mean
-            img_resized /= img_std
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 inference_state = predictor.init_state(img_resized, video_height, video_width)
 
                 # ==========================================
-                # FULLY AUTOMATIC PROMPTING (Bidirectional + 2.5D MIP)
+                # MULTI-FRAME PROMPTING (Bidirectional + 2.5D MIP)
                 # ==========================================
-                # Calculate the middle slice
                 D = img_3D_ori.shape[0]
-                mid_frame_idx = D // 2
-
-                # Feed the entire 3D volume to the MIP generator
-                point_prompts, labels = get_mip_guided_prompt(img_3D_ori, mid_frame_idx)
-
-                # Pass the MIP-verified points to the middle frame
-                _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
-                    inference_state=inference_state,
-                    frame_idx=mid_frame_idx,
-                    obj_id=1,
-                    points=point_prompts,
-                    labels=labels
-                )
-
+                
+                prompted_frames = []
+                for i in range(D):
+                    point_prompts, labels = get_mip_guided_prompt(img_3D_ori, i)
+                    
+                    if point_prompts is not None:
+                        _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
+                            inference_state=inference_state,
+                            frame_idx=i,
+                            obj_id=1,
+                            points=point_prompts,
+                            labels=labels
+                        )
+                        prompted_frames.append(i)
+                
                 segs_3D = np.zeros(img_3D_ori.shape, dtype=np.uint8)
-                segs_3D[mid_frame_idx] = (out_mask_logits[0] > 0.0).cpu().numpy()[0].astype(np.uint8)
-
+                
                 # ==========================================
-                # VIDEO PROPAGATION PHASE (Bidirectional)
+                # VIDEO PROPAGATION PHASE (Global)
                 # ==========================================
-                # Track Forward
-                for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
-                        inference_state, start_frame_idx=mid_frame_idx, reverse=False
-                ):
-                    segs_3D[out_frame_idx] = (out_mask_logits[0] > 0.0).cpu().numpy()[0].astype(np.uint8)
-
-                # Track Backward
-                for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
-                        inference_state, start_frame_idx=mid_frame_idx, reverse=True
-                ):
-                    segs_3D[out_frame_idx] = (out_mask_logits[0] > 0.0).cpu().numpy()[0].astype(np.uint8)
+                if len(prompted_frames) > 0:
+                    for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
+                        segs_3D[out_frame_idx] = (out_mask_logits[0] > 0.0).cpu().numpy()[0].astype(np.uint8)
+                else:
+                    print(f"Warning: No vessels detected in any slice for {seq_id}")
 
                 # ==========================================
                 # DIAS 2.5D EVALUATION & EXPORT LOGIC

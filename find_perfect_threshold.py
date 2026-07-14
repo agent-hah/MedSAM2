@@ -28,7 +28,7 @@ def resize_grayscale_to_rgb_and_resize(array, image_size):
 
 
 def get_mip_guided_prompt(volume_3d, mid_idx):
-    mip_2d = np.max(volume_3d, axis=0)
+    mip_2d = np.min(volume_3d, axis=0)
 
     def get_contours(img_slice):
         if img_slice.max() <= 1.0:

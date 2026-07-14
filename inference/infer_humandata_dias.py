@@ -191,69 +191,78 @@ def compute_dice(mask1: np.ndarray, mask2: np.ndarray) -> float:
 
 
 def make_side_by_side_dias(img_gray, mask, label_left="Input", label_right="Prediction"):
-    """Create a side-by-side comparison with enhanced visibility."""
-    ptp = img_gray.max() - img_gray.min()
+    """Create a side-by-side comparison: input with colorbar (left) | red overlay with colorbar (right)."""
+    # Compute real min/max from the original image data before normalization
+    v_min = float(img_gray.min())
+    v_max = float(img_gray.max())
+    
+    ptp = v_max - v_min
     if ptp > 0:
-        img_uint8 = np.clip((img_gray - img_gray.min()) / ptp * 255, 0, 255).astype(np.uint8)
+        img_uint8 = np.clip((img_gray - v_min) / ptp * 255, 0, 255).astype(np.uint8)
     else:
         img_uint8 = np.clip(img_gray, 0, 255).astype(np.uint8)
-
+        
     if img_uint8.ndim > 2:
         img_uint8 = img_uint8[:, :, 0]
         
     # Apply CLAHE to improve contrast of the base image
-    # Note: Removed CLAHE so the linear colorbar accurately reflects the image intensities
-    img_clahe = img_uint8
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    img_clahe = clahe.apply(img_uint8)
 
     left = cv2.cvtColor(img_clahe, cv2.COLOR_GRAY2BGR)
+    right = left.copy()
     
-    # Prediction as a binary mask (black background, white foreground)
-    right = np.zeros_like(left)
-    right[mask > 0] = (255, 255, 255)
+    # Red overlay for prediction
+    overlay = right.copy()
+    overlay[mask > 0] = (0, 0, 255)
+    cv2.addWeighted(overlay, 0.5, right, 0.5, 0, right)
+    
+    # Add a thick red outline
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(right, contours, -1, (0, 0, 255), 2)
     
     h, w = left.shape[:2]
 
-    # Add labels with black outline for readability
+    # Font settings
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = max(0.4, h / 800)
     thickness = max(1, int(h / 400))
     
-    # Left text (Yellow with black outline)
+    # Add labels with black outline for readability
     cv2.putText(left, label_left, (10, 25), font, font_scale, (0, 0, 0), thickness + 2)
     cv2.putText(left, label_left, (10, 25), font, font_scale, (0, 255, 255), thickness)
-    
-    # Right text (Yellow with black outline)
     cv2.putText(right, label_right, (10, 25), font, font_scale, (0, 0, 0), thickness + 2)
     cv2.putText(right, label_right, (10, 25), font, font_scale, (0, 255, 255), thickness)
 
-    # Add a thin white separator
+    # --- Vertical Color Bar ---
+    bar_w = max(20, int(w * 0.04))
+    pad_y = int(h * 0.1)
+    bar_h = h - 2 * pad_y
+    
+    def make_vertical_colorbar(panel_h, panel_w, val_min, val_max):
+        """Create a vertical colorbar image to append to the right of a panel."""
+        cbar_img = np.zeros((panel_h, bar_w + 40, 3), dtype=np.uint8)
+        # Draw vertical gradient (top = max, bottom = min)
+        for y in range(bar_h):
+            val = int(255 * (1.0 - y / max(1, bar_h - 1)))
+            cv2.line(cbar_img, (5, pad_y + y), (5 + bar_w, pad_y + y), (val, val, val), 1)
+        # Draw border around the gradient
+        cv2.rectangle(cbar_img, (5, pad_y), (5 + bar_w, pad_y + bar_h), (200, 200, 200), 1)
+        # Max label (top)
+        text_max = f"{val_max:.1f}"
+        cv2.putText(cbar_img, text_max, (5, pad_y - 5), font, font_scale * 0.7, (255, 255, 255), max(1, thickness - 1))
+        # Min label (bottom)
+        text_min = f"{val_min:.1f}"
+        cv2.putText(cbar_img, text_min, (5, pad_y + bar_h + int(font_scale * 15) + 5), font, font_scale * 0.7, (255, 255, 255), max(1, thickness - 1))
+        return cbar_img
+    
+    # Both colorbars show the actual image intensity range
+    left_cbar = make_vertical_colorbar(h, w, v_min, v_max)
+    right_cbar = make_vertical_colorbar(h, w, v_min, v_max)
+
+    # Assemble: [left | left_cbar | separator | right | right_cbar]
     separator = np.ones((h, 2, 3), dtype=np.uint8) * 255
-    combined = np.hstack([left, separator, right])
-    
-    # Add Color Bar at the bottom
-    bar_h = max(40, int(h * 0.08))
-    colorbar_img = np.zeros((bar_h, combined.shape[1], 3), dtype=np.uint8)
-    
-    # Draw gradient in the center 60% of the bar
-    pad_x = int(combined.shape[1] * 0.2)
-    bar_w = combined.shape[1] - 2 * pad_x
-    for x in range(bar_w):
-        val = int(255 * x / max(1, bar_w - 1))
-        cv2.line(colorbar_img, (pad_x + x, int(bar_h * 0.3)), (pad_x + x, int(bar_h * 0.7)), (val, val, val), 1)
-        
-    # Draw Min/Max text
-    v_min, v_max = 0.0, 1.0
-    text_min = f"Min: {v_min:.1f}"
-    text_max = f"Max: {v_max:.1f}"
-    
-    (min_w, _), _ = cv2.getTextSize(text_min, font, font_scale, thickness)
-    
-    # Text positioning
-    cv2.putText(colorbar_img, text_min, (pad_x - min_w - 10, int(bar_h * 0.65)), font, font_scale, (255, 255, 255), thickness)
-    cv2.putText(colorbar_img, text_max, (pad_x + bar_w + 10, int(bar_h * 0.65)), font, font_scale, (255, 255, 255), thickness)
-    
-    combined = np.vstack([combined, colorbar_img])
-    
+    combined = np.hstack([left, left_cbar, separator, right, right_cbar])
     return combined
 
 
@@ -372,6 +381,21 @@ def process_sequence(seq_name: str, npz_path: str, model, output_base: str, wind
     target_count = min(8, len(all_window_starts))
     print(f"\n  {D} slices → searching for {target_count} {window_size}-frame windows with predictions (stride {window_size})")
 
+    # --- Global Sequence Normalization ---
+    # The DIAS models expect Z-score standardization applied per sequence, not per window.
+    # Normalizing per window amplifies background noise in dark windows.
+    frames_float = frames.astype(np.float32)
+    seq_min, seq_max = frames_float.min(), frames_float.max()
+    ptp = seq_max - seq_min
+    if ptp > 0:
+        frames_norm = np.clip((frames_float - seq_min) / ptp * 255, 0, 255)
+    else:
+        frames_norm = np.clip(frames_float, 0, 255)
+        
+    seq_mean = frames_norm.mean()
+    seq_std = frames_norm.std() + 1e-8
+    frames_z = (frames_norm - seq_mean) / seq_std
+
     valid_windows = []
     empty_windows = []
     total_voxels = 0
@@ -379,13 +403,9 @@ def process_sequence(seq_name: str, npz_path: str, model, output_base: str, wind
 
     for w_start in tqdm(all_window_starts, desc="Predicting windows", leave=False):
         w_end = w_start + window_size
-        window_frames = frames[w_start:w_end].astype(np.float32)
-        ptp = window_frames.max() - window_frames.min()
-        if ptp > 0:
-            window_frames = np.clip((window_frames - window_frames.min()) / ptp * 255, 0, 255)
-            
-        # The DIAS repository applies Z-score standardization per sequence
-        window_frames = (window_frames - window_frames.mean()) / (window_frames.std() + 1e-8)
+        
+        # Grab the pre-normalized window
+        window_frames = frames_z[w_start:w_end]
             
         window_tensor = torch.from_numpy(window_frames).unsqueeze(0).cuda().to(torch.float32)
         model_name = model.class_name if hasattr(model, 'class_name') else model.__class__.__name__
@@ -563,7 +583,7 @@ def process_sequence(seq_name: str, npz_path: str, model, output_base: str, wind
         input_frame, pred_frame,
         label_left=f"Input (Middle Frame {D // 2})", label_right="Prediction"
     )
-    cv2.imwrite(os.path.join(seq_output_dir, "comparison.png"), summary_img)
+    cv2.imwrite(os.path.join(seq_output_dir, "summary_comparison.png"), summary_img)
 
     stats = {
         "seq_name": seq_name,
@@ -663,7 +683,7 @@ def print_summary(all_stats: list):
     print("=" * 80)
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="MedSAM2 Inference for DIAS Analysis")
     # Original args
     parser.add_argument("--input_dir", type=str,
@@ -738,3 +758,6 @@ if __name__ == "__main__":
 
     # Print summary
     print_summary(all_stats)
+
+if __name__ == "__main__":
+    main()

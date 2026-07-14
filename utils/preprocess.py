@@ -2,8 +2,9 @@ import os
 import json
 import cv2
 import numpy as np
-from skimage.filters import frangi
+from skimage.filters import frangi, threshold_otsu
 from skimage.restoration import denoise_tv_bregman
+from scipy.ndimage import distance_transform_edt
 
 def apply_window_level(image, center, width):
     """
@@ -33,13 +34,25 @@ def apply_tv_denoising(image, weight=0.35):
     denoised = denoise_tv_bregman(img_float, weight=weight)
     return denoised.astype(np.float32)
 
-def apply_frangi_filter(image):
+def apply_clahe(image, clip_limit=2.0, tile_grid_size=(8,8)):
+    """
+    Applies Contrast Limited Adaptive Histogram Equalization (CLAHE).
+    Expects a uint8 image [0, 255]. Returns a uint8 image.
+    """
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    return clahe.apply(image)
+
+def apply_frangi_filter(image, black_ridges=False, dynamic_sigmas=False):
     """
     Applies Frangi (Hessian) filter to enhance vessel-like structures.
     Expects input to be a 2D array. Returns output normalized to [0, 255] as uint8.
+    By default detects bright ridges (black_ridges=False) as typically seen in MRA/CTA.
     """
+    # Use a reasonable default range for vessel sizes in pixels
+    sigmas = range(1, 10, 2)
+
     # frangi handles intensity scaling automatically, usually returns values in a very small range
-    filtered = frangi(image)
+    filtered = frangi(image, sigmas=sigmas, black_ridges=black_ridges)
     
     f_min, f_max = filtered.min(), filtered.max()
     if f_max > f_min:
@@ -168,7 +181,7 @@ def crop_image(image, roi):
     x, y, w, h = roi
     return image[y:y+h, x:x+w]
 
-def apply_full_preprocessing(image, window_center=None, window_width=None, tv_weight=0.35, use_frangi=True):
+def apply_full_preprocessing(image, window_center=None, window_width=None, tv_weight=0.0, use_frangi=False, dynamic_sigmas=False, black_ridges=False, use_clahe=True, clahe_clip=2.0, clahe_tile=(8,8)):
     """
     Convenience function that applies the full preprocessing pipeline to a single 2D slice.
     """
@@ -190,10 +203,13 @@ def apply_full_preprocessing(image, window_center=None, window_width=None, tv_we
         img = apply_tv_denoising(img, weight=tv_weight)
         
     if use_frangi:
-        img = apply_frangi_filter(img)
+        img = apply_frangi_filter(img, black_ridges=black_ridges, dynamic_sigmas=dynamic_sigmas)
     else:
         # If no frangi, ensure it's uint8
         if img.max() <= 1.0:
             img = (img * 255).astype(np.uint8)
             
+    if use_clahe:
+        img = apply_clahe(img, clip_limit=clahe_clip, tile_grid_size=clahe_tile)
+        
     return img
