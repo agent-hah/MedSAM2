@@ -33,3 +33,6 @@ results*/
 generate_pptx.py
 *.ipynb
 find_perfect_threshold.py
+clahe_with_minmax
+crop_cache.json
+gt_generation/

@@ -11,7 +11,7 @@ from PIL import Image
 from sam2.build_sam import build_sam2_video_predictor_npz
 
 # Import DIAS evaluation utilities
-from utils.metrics import get_metrics, get_color, AverageMeter
+from utils.metrics import get_metrics, get_color, AverageMeter, count_connect_component
 
 def resize_grayscale_to_rgb_and_resize(array, image_size):
     """Utility to format the 3D volume for MedSAM2 Video Predictor"""
@@ -97,15 +97,111 @@ def get_mip_guided_prompt(volume_3d, mid_idx):
         # No vessels detected on this slice
         return None, None
 
+def make_side_by_side_dias(img_gray, mask, label_left="Input", label_right="Prediction"):
+    """Create a side-by-side comparison: input with colorbar (left) | red overlay with colorbar (right)."""
+    # Compute real min/max from the original image data before normalization
+    v_min = float(img_gray.min())
+    v_max = float(img_gray.max())
+    
+    ptp = v_max - v_min
+    if ptp > 0:
+        img_uint8 = np.clip((img_gray - v_min) / ptp * 255, 0, 255).astype(np.uint8)
+    else:
+        img_uint8 = np.clip(img_gray, 0, 255).astype(np.uint8)
+        
+    if img_uint8.ndim > 2:
+        img_uint8 = img_uint8[:, :, 0]
+        
+    left = cv2.cvtColor(img_uint8, cv2.COLOR_GRAY2BGR)
+    right = left.copy()
+    
+    # Red overlay for prediction
+    overlay = right.copy()
+    overlay[mask > 0] = (0, 0, 255)
+    cv2.addWeighted(overlay, 0.5, right, 0.5, 0, right)
+    
+    # Add a thick red outline
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(right, contours, -1, (0, 0, 255), 2)
+    
+    h, w = left.shape[:2]
+
+    # Font settings
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.4, h / 800)
+    thickness = max(1, int(h / 400))
+    
+    # Add labels with black outline for readability
+    cv2.putText(left, label_left, (10, 25), font, font_scale, (0, 0, 0), thickness + 2)
+    cv2.putText(left, label_left, (10, 25), font, font_scale, (0, 255, 255), thickness)
+    cv2.putText(right, label_right, (10, 25), font, font_scale, (0, 0, 0), thickness + 2)
+    cv2.putText(right, label_right, (10, 25), font, font_scale, (0, 255, 255), thickness)
+
+    # --- Vertical Color Bar ---
+    bar_w = max(20, int(w * 0.04))
+    pad_y = int(h * 0.1)
+    bar_h = h - 2 * pad_y
+    
+    def make_vertical_colorbar(panel_h, panel_w, val_min, val_max):
+        """Create a vertical colorbar image to append to the right of a panel."""
+        cbar_img = np.zeros((panel_h, bar_w + 40, 3), dtype=np.uint8)
+        # Draw vertical gradient (top = max, bottom = min)
+        for y in range(bar_h):
+            val = int(255 * (1.0 - y / max(1, bar_h - 1)))
+            cv2.line(cbar_img, (5, pad_y + y), (5 + bar_w, pad_y + y), (val, val, val), 1)
+        # Draw border around the gradient
+        cv2.rectangle(cbar_img, (5, pad_y), (5 + bar_w, pad_y + bar_h), (200, 200, 200), 1)
+        # Max label (top)
+        text_max = f"{val_max:.1f}"
+        cv2.putText(cbar_img, text_max, (5, pad_y - 5), font, font_scale * 0.7, (255, 255, 255), max(1, thickness - 1))
+        # Min label (bottom)
+        text_min = f"{val_min:.1f}"
+        cv2.putText(cbar_img, text_min, (5, pad_y + bar_h + int(font_scale * 15) + 5), font, font_scale * 0.7, (255, 255, 255), max(1, thickness - 1))
+        return cbar_img
+    
+    # Both colorbars show the actual image intensity range
+    left_cbar = make_vertical_colorbar(h, w, v_min, v_max)
+    right_cbar = make_vertical_colorbar(h, w, v_min, v_max)
+
+    # Assemble: [left | left_cbar | separator | right | right_cbar]
+    separator = np.ones((h, 2, 3), dtype=np.uint8) * 255
+    combined = np.hstack([left, left_cbar, separator, right, right_cbar])
+    return combined
+
+def save_side_by_side_video(img_3D_ori, segs_3D, video_path):
+    """Saves a side-by-side MP4 video comparing the target slice and the prediction overlay."""
+    D, H, W = img_3D_ori.shape
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    
+    first_combined = make_side_by_side_dias(
+        img_3D_ori[0], segs_3D[0],
+        label_left=f"Target Slice 0", label_right="Prediction"
+    )
+    video_h, video_w = first_combined.shape[:2]
+    
+    video = cv2.VideoWriter(video_path, fourcc, 10, (video_w, video_h))
+    
+    for i in range(D):
+        combined = make_side_by_side_dias(
+            img_3D_ori[i], segs_3D[i],
+            label_left=f"Target Slice {i}", label_right="Prediction"
+        )
+        video.write(combined)
+    video.release()
+
 def run_inference_and_evaluate(config_name, checkpoint_path, test_data_dir, output_dir):
-    # 1. Replicate DIAS Tester directory structure
+    # 1. Replicate DIAS Tester directory structure exactly
     pred_folder = os.path.join(output_dir, 'pred')
+    pred_b_folder = os.path.join(output_dir, 'pred_b')
     gt_folder = os.path.join(output_dir, 'gt')
-    color_folder = os.path.join(output_dir, 'color_imgs')
+    color_folder = os.path.join(output_dir, 'color')
+    videos_folder = os.path.join(output_dir, 'videos')
 
     os.makedirs(pred_folder, exist_ok=True)
+    os.makedirs(pred_b_folder, exist_ok=True)
     os.makedirs(gt_folder, exist_ok=True)
     os.makedirs(color_folder, exist_ok=True)
+    os.makedirs(videos_folder, exist_ok=True)
 
     # Initialize DIAS metric trackers
     results = {
@@ -118,6 +214,8 @@ def run_inference_and_evaluate(config_name, checkpoint_path, test_data_dir, outp
         "AUC": AverageMeter(),
         "cldice": AverageMeter()
     }
+    vc_meter = AverageMeter()
+    individual_results = []
 
     print(f"Building model using config: {config_name}")
     print(f"Loading checkpoint from {checkpoint_path}...")
@@ -127,7 +225,7 @@ def run_inference_and_evaluate(config_name, checkpoint_path, test_data_dir, outp
     test_files = [f for f in os.listdir(test_data_dir) if f.endswith(".npz")]
 
     with torch.no_grad():
-        for filename in tqdm(test_files, desc="Testing"):
+        for j, filename in enumerate(tqdm(test_files, desc="Testing", ncols=150)):
             seq_id = filename.split(".")[0]
             file_path = os.path.join(test_data_dir, filename)
 
@@ -145,7 +243,6 @@ def run_inference_and_evaluate(config_name, checkpoint_path, test_data_dir, outp
             seq_mean = img_resized.mean()
             seq_std = img_resized.std() + 1e-8
             img_resized = (img_resized - seq_mean) / seq_std
-
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 inference_state = predictor.init_state(img_resized, video_height, video_width)
@@ -184,55 +281,77 @@ def run_inference_and_evaluate(config_name, checkpoint_path, test_data_dir, outp
                 # DIAS 2.5D EVALUATION & EXPORT LOGIC
                 # ==========================================
                 # 1. Squash the 3D tracked prediction into a single 2D MIP mask
-                # If the vessel was tracked in ANY slice, it becomes 1 in the final 2D mask.
                 predict_2d_mip = np.max(segs_3D, axis=0)
+                predict_b = np.where(predict_2d_mip >= 0.5, 1, 0)
 
                 # 2. Extract the single ground truth mask
-                # (Handling cases where gts_3D might be shape (1, H, W) or just (H, W))
                 target_2d = gts_3D[0] if gts_3D.ndim == 3 else gts_3D
 
-                # 3. Save raw numpy arrays (Now saving the 2D versions to match DIAS)
-                np.save(os.path.join(pred_folder, f'{seq_id}.npy'), predict_2d_mip)
-                np.save(os.path.join(gt_folder, f'{seq_id}.npy'), target_2d)
+                # 3. Format images as uint8 contiguous arrays
+                gt_img = np.ascontiguousarray((target_2d * 255).astype(np.uint8))
+                pre_img = np.ascontiguousarray((predict_2d_mip * 255).astype(np.uint8))
+                pre_b_img = np.ascontiguousarray((predict_b * 255).astype(np.uint8))
 
-                # 4. Generate and save a single Color PNG per sequence
-                img_color = get_color(predict_2d_mip, target_2d)
-                cv2.imwrite(os.path.join(color_folder, f'{seq_id}.png'), img_color)
+                # 4. Save PNG images using index j
+                cv2.imwrite(os.path.join(gt_folder, f"gt{j}.png"), gt_img)
+                cv2.imwrite(os.path.join(pred_folder, f"pre{j}.png"), pre_img)
+                cv2.imwrite(os.path.join(pred_b_folder, f"pre_b{j}.png"), pre_b_img)
 
-                # 5. Calculate metrics ONCE per sequence and update trackers
+                img_color = get_color(predict_b, target_2d)
+                cv2.imwrite(os.path.join(color_folder, f"color_b{j}.png"), img_color.astype(np.uint8))
+                
+                # 5. Save the side-by-side MP4 video for this sequence
+                video_path = os.path.join(videos_folder, f"video_{j}.mp4")
+                save_side_by_side_video(img_3D_ori, segs_3D, video_path)
+
+                # 6. Calculate metrics per sequence and update trackers
                 metric = get_metrics(predict_2d_mip, target_2d, run_clDice=True)
                 for k in results.keys():
                     results[k].update(metric[k])
+                
+                vc_val = count_connect_component(predict_b, target_2d)
+                vc_meter.update(vc_val)
+                
+                ind_metric = {'image_id': f"image_{j}"}
+                ind_metric.update(metric)
+                ind_metric['VC'] = vc_val
+                individual_results.append(ind_metric)
 
     # ==========================================
     # FINAL METRICS EXPORT
     # ==========================================
-    # Save the tracked metrics to results.csv
-    df = pd.DataFrame()
-    for k in results.keys():
-        df[k] = [results[k].mean, results[k].std]
-
-    # Label the rows for clarity (row 0 = mean, row 1 = std)
-    df.index = ['mean', 'std']
-
-    csv_path = os.path.join(output_dir, 'results.csv')
-    df.to_csv(csv_path, index=True)
+    model_name = "medsam2"
+    mean_data = [results[k].mean for k in results.keys()] + [vc_meter.mean]
+    std_data = [results[k].std for k in results.keys()] + [vc_meter.std]
+    columns = list(results.keys()) + ["VC"]
+    
+    formatted_data = [rf"{mean:.4f}$\pm${std:.4f}" for mean, std in zip(mean_data, std_data)]
+    data_dict = {col: [val] for col, val in zip(columns, formatted_data)}
+    
+    df = pd.DataFrame(data_dict)
+    df.to_csv(os.path.join(output_dir, f"{model_name}_result.csv"), index=False)
+    
+    df_ind = pd.DataFrame(individual_results)
+    df_ind.to_csv(os.path.join(output_dir, f"{model_name}_individual_results.csv"), index=False)
 
     print("\n" + "="*45)
     print("      DIAS BENCHMARK RESULTS      ")
     print("="*45)
-    for k, v in results.items():
-        print(f"{k:6}: {v.mean:.4f} ± {v.std:.4f}")
+    for k in results.keys():
+        print(f"{k:6} (Mean) : {results[k].mean:.4f}")
+    for k in results.keys():
+        print(f"{k:6} (Std)  : {results[k].std:.4f}")
+    print(f"VC     (Mean) : {vc_meter.mean:.4f}")
+    print(f"VC     (Std)  : {vc_meter.std:.4f}")
     print("="*45)
-    print(f"Metrics saved to {csv_path}")
-    print(f"Color overlays saved to {color_folder}")
+    print(f"Metrics saved to {output_dir}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate MedSAM2 identically to DIAS 3D full-supervised benchmark")
     parser.add_argument("-c", "--config", required=True, help="Base inference config (e.g., sam2.1_hiera_t512.yaml)")
     parser.add_argument("-ckpt", "--checkpoint", required=True, help="Path to fine-tuned checkpoint.pt")
     parser.add_argument("-d", "--data_dir", required=True, help="Path to preprocessed DIAS Test NPZ folder")
-    parser.add_argument("-o", "--output_dir", required=True, help="Path to save pred/, gt/, color_imgs/, and results.csv")
+    parser.add_argument("-o", "--output_dir", required=True, help="Path to save pred/, gt/, color/, videos/, and results")
 
     args = parser.parse_args()
 

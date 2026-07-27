@@ -73,7 +73,7 @@ def normalize_to_uint8(array: np.ndarray) -> np.ndarray:
 def resize_volume(volume_3d: np.ndarray, image_size: int) -> np.ndarray:
     """Resize each frame in a (D, H, W) volume to (image_size, image_size)."""
     D = volume_3d.shape[0]
-    resized = np.zeros((D, image_size, image_size), dtype=np.uint8)
+    resized = np.zeros((D, image_size, image_size), dtype=volume_3d.dtype)
     for i in range(D):
         resized[i] = cv2.resize(
             volume_3d[i], (image_size, image_size),
@@ -137,7 +137,8 @@ def process_multiframe_dicom(dcm_path: str, image_size: int, seq_name: str, args
             window_width=args.window_width,
             tv_weight=args.tv_weight,
             use_frangi=args.use_frangi,
-            use_clahe=not args.no_clahe
+            use_clahe=not args.no_clahe,
+            use_minmax=not getattr(args, 'no_minmax', False)
         )
         processed_frames.append(frame_processed)
 
@@ -185,7 +186,8 @@ def process_singleframe_directory(dcm_paths: list, image_size: int, seq_name: st
             window_width=args.window_width,
             tv_weight=args.tv_weight,
             use_frangi=args.use_frangi,
-            use_clahe=not args.no_clahe
+            use_clahe=not args.no_clahe,
+            use_minmax=not getattr(args, 'no_minmax', False)
         )
         processed_frames.append(frame_processed)
 
@@ -394,6 +396,7 @@ parser.add_argument("--window_width", type=float, default=None, help="Window wid
 parser.add_argument("--tv_weight", type=float, default=0.0, help="Total variation denoising weight")
 parser.add_argument("--use_frangi", action="store_true", help="Enable Frangi/Hessian filtering")
 parser.add_argument("--no_clahe", action="store_true", help="Disable CLAHE filtering")
+parser.add_argument("--no_minmax", action="store_true", help="Disable Min-Max Normalization")
 parser.add_argument("--skip-cropping", action="store_true", help="Skip the cropping step entirely")
 parser.add_argument("--overwrite", action="store_true", help="Overwrite existing NPZ files")
 

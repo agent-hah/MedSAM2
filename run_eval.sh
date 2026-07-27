@@ -20,7 +20,7 @@ python evaluate_medsam2.py \
   -c configs/sam2.1_hiera_t512.yaml \
   -ckpt exp_log/MedSAM2_DIAS_Standard/take3/checkpoints/checkpoint.pt \
   -d data/medsam_preprocessed/DIAS_Test_NPZ \
-  -o exp_log/MedSAM2_DIAS_Standard/take3/eval9
+  -o exp_log/MedSAM2_DIAS_Standard/take3/eval10
 
 #python find_perfect_threshold.py \
 #  -c configs/sam2.1_hiera_t512.yaml \

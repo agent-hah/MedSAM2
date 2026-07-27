@@ -88,9 +88,9 @@ def get_color(predict, target):
             elif tn[i, j] == 1:
                 img_colour[i, j, :] = [0, 0, 0]
             elif fp[i, j] == 1:
-                img_colour[i, j, :] = [0, 255, 255]   # Yellow in BGR
+                img_colour[i, j, :] = [0, 255, 0]     # Green in BGR
             elif fn[i, j] == 1:
-                img_colour[i, j, :] = [250, 128, 114] # Blue in BGR
+                img_colour[i, j, :] = [0, 0, 255]     # Red in BGR
     return img_colour
 
 

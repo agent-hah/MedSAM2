@@ -181,7 +181,7 @@ def crop_image(image, roi):
     x, y, w, h = roi
     return image[y:y+h, x:x+w]
 
-def apply_full_preprocessing(image, window_center=None, window_width=None, tv_weight=0.0, use_frangi=False, dynamic_sigmas=False, black_ridges=False, use_clahe=True, clahe_clip=2.0, clahe_tile=(8,8)):
+def apply_full_preprocessing(image, window_center=None, window_width=None, tv_weight=0.0, use_frangi=False, dynamic_sigmas=False, black_ridges=False, use_clahe=True, clahe_clip=2.0, clahe_tile=(8,8), use_minmax=True):
     """
     Convenience function that applies the full preprocessing pipeline to a single 2D slice.
     """
@@ -189,7 +189,7 @@ def apply_full_preprocessing(image, window_center=None, window_width=None, tv_we
     
     if window_center is not None and window_width is not None:
         img = apply_window_level(img, window_center, window_width)
-    else:
+    elif use_minmax:
         # If no window given but it's raw dicom, just min-max normalize
         if img.max() > 255:
             if img.max() == img.min():
@@ -198,6 +198,8 @@ def apply_full_preprocessing(image, window_center=None, window_width=None, tv_we
                 img = ((img - img.min()) / (img.max() - img.min()) * 255).astype(np.uint8)
         else:
             img = img.astype(np.uint8)
+    else:
+        img = img.astype(np.float32)
             
     if tv_weight > 0:
         img = apply_tv_denoising(img, weight=tv_weight)
@@ -210,6 +212,8 @@ def apply_full_preprocessing(image, window_center=None, window_width=None, tv_we
             img = (img * 255).astype(np.uint8)
             
     if use_clahe:
+        if img.dtype != np.uint8:
+            raise ValueError("CLAHE requires a uint8 image. Ensure use_minmax is True when using CLAHE.")
         img = apply_clahe(img, clip_limit=clahe_clip, tile_grid_size=clahe_tile)
         
     return img
