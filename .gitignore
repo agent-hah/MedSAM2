@@ -36,3 +36,6 @@ find_perfect_threshold.py
 clahe_with_minmax
 crop_cache.json
 gt_generation/
+data/nifti*
+*.mp4
+convert_nifti_to_nrrd.py
